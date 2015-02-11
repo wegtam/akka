@@ -371,7 +371,14 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     case other             ⇒ super.unhandled(other)
   }
 
-  def initJoin(): Unit = sender() ! InitJoinAck(selfAddress)
+  def initJoin(): Unit = {
+    val selfStatus = latestGossip.member(selfUniqueAddress).status
+    if (Gossip.removeUnreachableWithMemberStatus.contains(selfStatus))
+      // prevents a Down and Exiting node from being used for joining
+      sender() ! InitJoinNack(selfAddress)
+    else
+      sender() ! InitJoinAck(selfAddress)
+  }
 
   def joinSeedNodes(newSeedNodes: immutable.IndexedSeq[Address]): Unit = {
     if (newSeedNodes.nonEmpty) {
@@ -444,12 +451,15 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
    * current gossip state, including the new joining member.
    */
   def joining(node: UniqueAddress, roles: Set[String]): Unit = {
+    val selfStatus = latestGossip.member(selfUniqueAddress).status
     if (node.address.protocol != selfAddress.protocol)
       log.warning("Member with wrong protocol tried to join, but was ignored, expected [{}] but was [{}]",
         selfAddress.protocol, node.address.protocol)
     else if (node.address.system != selfAddress.system)
       log.warning("Member with wrong ActorSystem name tried to join, but was ignored, expected [{}] but was [{}]",
         selfAddress.system, node.address.system)
+    else if (Gossip.removeUnreachableWithMemberStatus.contains(selfStatus))
+      logInfo("Trying to join [{}] to [{}] member, ignoring. Use a member that is Up instead.", node, selfStatus)
     else {
       val localMembers = latestGossip.members
 
@@ -499,6 +509,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     else {
       logInfo("Welcome from [{}]", from.address)
       latestGossip = gossip seen selfUniqueAddress
+      assertLatestGossip()
       publish(latestGossip)
       if (from != selfUniqueAddress)
         gossipTo(from, sender())
@@ -645,10 +656,26 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
           (remoteGossip, !remoteGossip.seenByNode(selfUniqueAddress), Newer)
         case _ ⇒
           // conflicting versions, merge
-          (remoteGossip merge localGossip, true, Merge)
+          val prunedLocalGossip = localGossip.members.foldLeft(localGossip) { (g, m) ⇒
+            if (Gossip.removeUnreachableWithMemberStatus(m.status) && !remoteGossip.members.contains(m)) {
+              log.debug("Cluster Node [{}] - Pruned conflicting local gossip: {}", selfAddress, m)
+              g.prune(VectorClock.Node(vclockName(m.uniqueAddress)))
+            } else
+              g
+          }
+          val prunedRemoteGossip = remoteGossip.members.foldLeft(remoteGossip) { (g, m) ⇒
+            if (Gossip.removeUnreachableWithMemberStatus(m.status) && !localGossip.members.contains(m)) {
+              log.debug("Cluster Node [{}] - Pruned conflicting remote gossip: {}", selfAddress, m)
+              g.prune(VectorClock.Node(vclockName(m.uniqueAddress)))
+            } else
+              g
+          }
+
+          (prunedRemoteGossip merge prunedLocalGossip, true, Merge)
       }
 
       latestGossip = winningGossip seen selfUniqueAddress
+      assertLatestGossip()
 
       // for all new joining nodes we remove them from the failure detector
       latestGossip.members foreach {
@@ -671,6 +698,13 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
           case Older   ⇒ gossipStats.incrementOlderCount
           case Ignored ⇒ gossipStats // included in receivedGossipCount
         }
+      }
+
+      // FIXME remove
+      if (latestGossip.version.versions.size > latestGossip.members.size) {
+        log.info(s"Too many vclock after receiveGossip ${latestGossip.version.versions.size} max ${latestGossip.members.size} " +
+          s"""causal relationship $comparison between "remote" gossip and "local" gossip - Remote[{}] - Local[{}] - merged them into [{}]""",
+          remoteGossip, localGossip, winningGossip)
       }
 
       publish(latestGossip)
@@ -853,7 +887,13 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
       // removing REMOVED nodes from the `reachability` table
       val newReachability = localOverview.reachability.remove(removed)
       val newOverview = localOverview copy (seen = newSeen, reachability = newReachability)
-      val newGossip = localGossip copy (members = newMembers, overview = newOverview)
+      val newVersion = removed.foldLeft(localGossip.version) { (v, node) ⇒
+        v.prune(VectorClock.Node(vclockName(node)))
+      }
+      val newGossip = localGossip copy (members = newMembers, overview = newOverview, version = newVersion)
+      // FIXME remove
+      if (newGossip.version.versions.size > newGossip.members.size)
+        logInfo("Too many vclock {} max {}", newGossip.version.versions.size, newGossip.members.size)
 
       updateLatestGossip(newGossip)
 
@@ -983,7 +1023,12 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     val seenVersionedGossip = versionedGossip onlySeen (selfUniqueAddress)
     // Update the state with the new gossip
     latestGossip = seenVersionedGossip
+    assertLatestGossip()
   }
+
+  def assertLatestGossip(): Unit =
+    if (Cluster.isAssertInvariantsEnabled && latestGossip.version.versions.size > latestGossip.members.size)
+      throw new IllegalStateException(s"Too many vector clock entries in gossip state ${latestGossip}")
 
   def publish(newGossip: Gossip): Unit = {
     publisher ! PublishChanges(newGossip)
