@@ -157,12 +157,14 @@ class Persistence(val system: ExtendedActorSystem) extends Extension {
   private val snapshotPluginExtensionId = new AtomicReference[Map[String, ExtensionId[PluginHolder]]](Map.empty)
 
   /**
+   * INTERNAL API
+   *
    * Returns a journal plugin actor identified by `journalPluginId`.
    * When empty, looks in `akka.persistence.journal.plugin` to find configuration entry path.
    * When configured, uses `journalPluginId` as absolute path to the journal configuration entry.
    * Configuration entry must contain few required fields, such as `class`. See `src/main/resources/reference.conf`.
    */
-  @tailrec final def journalFor(journalPluginId: String): ActorRef = {
+  @tailrec private[akka] final def journalFor(journalPluginId: String): ActorRef = {
     val configPath = if (isEmpty(journalPluginId)) defaultJournalPluginId else journalPluginId
     val extensionIdMap = journalPluginExtensionId.get
     extensionIdMap.get(configPath) match {
@@ -179,12 +181,14 @@ class Persistence(val system: ExtendedActorSystem) extends Extension {
   }
 
   /**
+   * INTERNAL API
+   *
    * Returns a snapshot store plugin actor identified by `snapshotPluginId`.
    * When empty, looks in `akka.persistence.snapshot-store.plugin` to find configuration entry path.
    * When configured, uses `snapshotPluginId` as absolute path to the snapshot store configuration entry.
    * Configuration entry must contain few required fields, such as `class`. See `src/main/resources/reference.conf`.
    */
-  @tailrec final def snapshotStoreFor(snapshotPluginId: String): ActorRef = {
+  @tailrec private[akka] final def snapshotStoreFor(snapshotPluginId: String): ActorRef = {
     val configPath = if (isEmpty(snapshotPluginId)) defaultSnapshotPluginId else snapshotPluginId
     val extensionIdMap = snapshotPluginExtensionId.get
     extensionIdMap.get(configPath) match {
