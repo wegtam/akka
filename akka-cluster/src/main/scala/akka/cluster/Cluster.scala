@@ -164,7 +164,7 @@ class Cluster(val system: ExtendedActorSystem) extends Extension {
         log.error(e, "Failed to startup Cluster. You can try to increase 'akka.actor.creation-timeout'.")
         shutdown()
         // don't re-throw, that would cause the extension to be re-recreated
-        // from shutdown() or other places, which may result in 
+        // from shutdown() or other places, which may result in
         // InvalidActorNameException: actor name [cluster] is not unique
         system.deadLetters
     }
@@ -206,7 +206,7 @@ class Cluster(val system: ExtendedActorSystem) extends Extension {
    * will be sent to the subscriber as the first message.
    */
   @varargs def subscribe(subscriber: ActorRef, to: Class[_]*): Unit =
-    clusterCore ! InternalClusterAction.Subscribe(subscriber, initialStateMode = InitialStateAsSnapshot, to.toSet)
+    subscribe(subscriber, initialStateMode = InitialStateAsSnapshot, to: _*)
 
   /**
    * Subscribe to one or more cluster domain events.
@@ -223,8 +223,10 @@ class Cluster(val system: ExtendedActorSystem) extends Extension {
    *
    * Note that for large clusters it is more efficient to use `InitialStateAsSnapshot`.
    */
-  @varargs def subscribe(subscriber: ActorRef, initialStateMode: SubscriptionInitialStateMode, to: Class[_]*): Unit =
+  @varargs def subscribe(subscriber: ActorRef, initialStateMode: SubscriptionInitialStateMode, to: Class[_]*): Unit = {
+    require(to.length > 0, "at least one `ClusterDomainEvent` class is required")
     clusterCore ! InternalClusterAction.Subscribe(subscriber, initialStateMode, to.toSet)
+  }
 
   /**
    * Unsubscribe to all cluster domain events.
